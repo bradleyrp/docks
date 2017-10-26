@@ -8,10 +8,16 @@ Example configurations not included.
 
 __all__ = ['docker','test','docker_list']
 
-import os,sys,re,tempfile,subprocess,shutil,time,json,pwd,datetime,copy
-from makeface import asciitree,bash,read_config,write_config
+import os,sys,re,tempfile,subprocess,shutil,time,json,pwd,datetime,copy,grp
 
-def interpret_docker_instructions(config):
+#---import for skunkworks
+try: from makeface import write_config,read_config
+except:
+	#---import for factory
+	sys.path.insert(0,os.path.join(os.getcwd(),'mill'))
+	from config import write_config,read_config
+
+def interpret_docker_instructions(config,mods=None):
 	"""
 	Read a docker configuration for running things in the docker.
 	"""
@@ -19,7 +25,7 @@ def interpret_docker_instructions(config):
 	from makeface import import_remote
 	if not os.path.isfile(config): raise Exception('cannot find %s'%config)
 	mod = import_remote(os.path.join('./',config))
-	instruct = mod['interpreter']()
+	instruct = mod['interpreter'](mods=mods)
 	#---validators go here
 	return instruct
 
@@ -42,7 +48,7 @@ def get_docker_toc(toc_fn):
 	toc = {} if not os.path.isfile(toc_fn) else json.load(open(toc_fn))
 	return toc
 
-def docker(name,config=None,**kwargs):
+def docker(name,config=None,mods=None,**kwargs):
 	"""
 	Manage the DOCKER.
 	"""
@@ -52,7 +58,7 @@ def docker(name,config=None,**kwargs):
 	if config==None: config = 'docker_config.py'
 	if kwargs: raise Exception('unprocessed kwargs %s'%kwargs)
 	#---get the interpreted docker configuration
-	instruct = interpret_docker_instructions(config=config)
+	instruct = interpret_docker_instructions(config=config,mods=mods)
 	#---the name is a sequence
 	if name not in instruct.get('sequences',{}): 
 		raise Exception('docker configuration lacks a sequence called %s'%name)
@@ -68,10 +74,14 @@ def docker(name,config=None,**kwargs):
 	steps = seq.split()
 	texts = [(step,instruct['dockerfiles'][step]) for step in steps]
 	#---final stage adds the user
+	this_user = pwd.getpwnam(os.environ['USER'])
+	this_user_details = {'gid':this_user.pw_gid,'uid':this_user.pw_uid,'user':os.environ['USER']}
+	this_user_details.update(gname=grp.getgrgid(this_user_details['gid']).gr_name)
+	#---! note that debian comes with a group "users" so we use groupmod but this might not be true on all
 	texts += [('su',
-		"RUN useradd -m -u %(uid)d -g %(gid)d %(user)s\nUSER %(user)s\nWORKDIR /home/%(user)s\n"%
-		[{'gid':i.pw_gid,'uid':i.pw_uid,'user':os.environ['USER']} 
-		for i in [pwd.getpwnam(os.environ['USER'])]][0])]
+		"RUN groupmod -g %(gid)d %(gname)s\n"%this_user_details+
+		"RUN useradd -m -u %(uid)d -g %(gid)d %(user)s\nUSER %(user)s\nWORKDIR /home/%(user)s\n"
+		%this_user_details)]
 	#---never rebuild if unnecessary (docker builds are extremely quick but why waste the time)
 	#---we use the texts of the docker instead of timestamps, since users might be updating other parts of the config
 	#---...file pretty frequently
@@ -128,9 +138,10 @@ def test(*sigs,**kwargs):
 	build_dn = kwargs.pop('build','docker_builds')
 	username = kwargs.pop('username','biophyscode')
 	config_fn = kwargs.pop('config','docker_config.py')
+	mods_fn = kwargs.pop('mods',None)
 	if kwargs: raise Exception('unprocessed kwargs %s'%kwargs)
 	#---get the interpreted docker configuration
-	instruct = interpret_docker_instructions(config=config_fn)
+	instruct = interpret_docker_instructions(config=config_fn,mods=mods_fn)
 	#---use the sigs list to select a test set
 	tests = instruct.get('tests',{})
 	keys = [key for key in tests if set(sigs)==set(key.split())]
@@ -165,6 +176,7 @@ def docker_local(**kwargs):
 	Use one of the dockers we have prepared to 
 	"""
 	config_fn = kwargs.pop('config_fn','docker_config.py')
+	mods_fn = kwargs.pop('mods_fn',None)
 	#---get the docker history
 	config = read_config()
 	docker_history = config.get('docker_history',{})
@@ -174,7 +186,7 @@ def docker_local(**kwargs):
 	#---if the docker has never been made we make it
 	#---! this does not handle the possibility that the texts have changed
 	if docker_name not in docker_history: 
-		docker(name=docker_name,config=config_fn)
+		docker(name=docker_name,config=config_fn,mods=mods_fn)
 	#---check for once
 	do_once = kwargs.get('once',False)
 	#---check for an identical event in the testset history
