@@ -10,7 +10,6 @@ __all__ = ['docker','test','docker_list']
 
 import os,sys,re,tempfile,subprocess,shutil,time,json,pwd,datetime,copy,grp
 str_types = [str,unicode] if sys.version_info<(3,0) else [str]
-from datapack import delve
 
 #---import for skunkworks
 try: from makeface import write_config,read_config
@@ -56,7 +55,7 @@ def docker(name,config=None,mods=None,**kwargs):
 	"""
 	Manage the DOCKER.
 	"""
-	build_dn = kwargs.pop('build','docker_builds')
+	build_dn = kwargs.pop('build','builds')
 	toc_fn = kwargs.pop('toc_fn','docker.json')
 	username = kwargs.pop('username','biophyscode')
 	if config==None: config = 'docker_config.py'
@@ -81,10 +80,13 @@ def docker(name,config=None,mods=None,**kwargs):
 		if set(val.keys())>=set(['config_keys','filename_sub']): 
 			key_path = val['config_keys']
 			key_path = tuple([key_path]) if type(key_path) in str_types else key_path
-			try: spot = delve(config,*key_path)
-			except: 
-				msg = ' you may need to add items to the config.py using "make set"'
+			#---! previously used delve from datapack to do a nested lookup in config, however top-level
+			#---! ...keys should be fine and the testset_processor uses a raw lookup of config and 
+			#---! ...I would prefer to have the testsets be self-contained.
+			if len(key_path)!=1: raise Exception('not ready to do nested lookups. need to add delve back.')
+			if key_path[0] not in config:
 				raise Exception('failed to get item %s from the config dictionary.'%str(key_path)+msg)
+			spot = config[key_path]
 			#---substitute in the dockerfile
 			if key not in instruct['dockerfiles']: raise Exception('cannot find %s in dockerfiles'%key)
 			instruct['dockerfiles'][key] = re.sub(val['filename_sub'],
@@ -170,7 +172,7 @@ def docker_execute_local(**kwargs):
 	#---check keys here
 	keys_docker_local = ('docker','where','script','config_fn')
 	keys_docker_local_visit = ('docker','where','visit','config_fn')
-	keys_docker_local_opts = ('once','collect requirements','collect files',
+	keys_docker_local_opts = ('once','preliminary','collect files',
 		'notes','mounts','container_user','container_site')
 	keysets = {
 		(keys_docker_local,keys_docker_local_opts):'docker_local',
@@ -182,9 +184,7 @@ def docker_execute_local(**kwargs):
 	#---default container user and site
 	kwargs['container_user'] = kwargs.get('container_user','biophyscode')
 	kwargs['container_site'] = kwargs.get('container_user','/root')
-	if len(choices)!=1: 
-		import ipdb;ipdb.set_trace()
-		raise Exception(fail)
+	if len(choices)!=1: raise Exception(fail)
 	if choices[0]=='docker_local': docker_local(**kwargs)
 	else: raise Exception(fail)
 
@@ -225,15 +225,15 @@ def docker_local(**kwargs):
 		except Exception as e: 
 			raise Exception('exception is: %s. you might need to mkdir. we failed to make %s'%(e,spot))
 	else: print('[STATUS] found %s'%spot)
+	#---run the custom requirements script
+	if 'preliminary' in kwargs:
+		import tempfile
+		script = tempfile.NamedTemporaryFile(delete=True)
+		with open(script.name,'w') as fp: fp.write(kwargs['preliminary'].replace('\\n', '\n'))
+		subprocess.check_call('bash %s'%fp.name,shell=True)
 	#---collect local files
 	for key,val in kwargs.get('collect files',{}).items():
 		shutil.copyfile(os.path.join(os.path.dirname(config_fn),key),os.path.join(spot,val))
-	#---run the custom requirements script
-	if 'collect requirements' in kwargs:
-		import tempfile
-		script = tempfile.NamedTemporaryFile(delete=True)
-		with open(script.name,'w') as fp: fp.write(kwargs['collect requirements'].replace('\\n', '\n'))
-		subprocess.check_call('bash %s'%fp.name,shell=True)
 	#---write the testset to the top directory. this is a transient file
 	if 'script' in kwargs and kwargs.get('visit',False):
 		raise Exception('found script and visit')
