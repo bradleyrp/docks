@@ -9,6 +9,8 @@ Example configurations not included.
 __all__ = ['docker','test','docker_list']
 
 import os,sys,re,tempfile,subprocess,shutil,time,json,pwd,datetime,copy,grp
+str_types = [str,unicode] if sys.version_info<(3,0) else [str]
+from datapack import delve
 
 #---import for skunkworks
 try: from makeface import write_config,read_config
@@ -70,6 +72,26 @@ def docker(name,config=None,mods=None,**kwargs):
 	#---get the docker history
 	config = read_config()
 	docker_history = config.get('docker_history',{})
+	#---process all requirements before making the texts
+	reqs = instruct.get('requirements',{})
+	for key,val in reqs.items():
+		#---perform a simple copy command in docker with a regex substitution for the filename
+		if set(val.keys())>=set(['config_keys','filename_sub']): 
+			key_path = val['config_keys']
+			key_path = tuple([key_path]) if type(key_path) in str_types else key_path
+			try: spot = delve(config,*key_path)
+			except: 
+				msg = ' you may need to add items to the config.py using "make set"'
+				raise Exception('failed to get item %s from the config dictionary.'%str(key_path)+msg)
+			#---substitute in the dockerfile
+			if key not in instruct['dockerfiles']: raise Exception('cannot find %s in dockerfiles'%key)
+			instruct['dockerfiles'][key] = re.sub(val['filename_sub'],
+				os.path.basename(spot),instruct['dockerfiles'][key])
+			for sub_from,sub_to in val.get('subs',{}).items():
+				instruct['dockerfiles'][key] = re.sub(sub_from,sub_to,instruct['dockerfiles'][key])
+			#---we always have to copy the file to the docker build directory
+			shutil.copyfile(spot,os.path.join(build_dn,os.path.basename(spot)))
+		else: raise Exception('cannot get requirement for %s: %s'%(key,val))
 	#---prepare the texts of the dockerfiles
 	steps = seq.split()
 	texts = [(step,instruct['dockerfiles'][step]) for step in steps]
@@ -83,23 +105,12 @@ def docker(name,config=None,mods=None,**kwargs):
 		"RUN useradd -m -u %(uid)d -g %(gid)d %(user)s\nUSER %(user)s\nWORKDIR /home/%(user)s\n"
 		%this_user_details)]
 	#---never rebuild if unnecessary (docker builds are extremely quick but why waste the time)
-	#---we use the texts of the docker instead of timestamps, since users might be updating other parts of the config
-	#---...file pretty frequently
+	#---we use the texts of the docker instead of timestamps, since users might be updating other parts 
+	#---...of the config file pretty frequently
 	if name in docker_history.keys():
 		if docker_history[name]['texts']==texts:
-			raise Exception('the docker called "%s" has already been built and the instructions have not changed'%name)
-	#---prepare requirements via links
-	needs = []
-	for step in steps:
-		if step not in instruct.get('dockerfiles',{}):
-			raise Exception('missing dockerfile for step %s from sequence %s'%(step,name))
-		if 'dockerfile_%s'%step in instruct.get('requirements',{}):
-			needs.extend(instruct['requirements']['dockerfile_%s'%step])
-	for need in needs: 
-		req_fn = os.path.abspath(os.path.expanduser(need))
-		if not os.path.isfile(req_fn): raise Exception('cannot find file: %s'%req_fn)
-		#---symlink doesn't work here
-		shutil.copyfile(req_fn,os.path.join(build_dn,os.path.basename(req_fn)))
+			raise Exception(('the docker called "%s" has already been built '+
+				'and the instructions have not changed')%name)
 	#---record the history for docker_history
 	updates = {name:[]}
 	#---loop over stages, each of which gets a separate image
@@ -145,7 +156,8 @@ def test(*sigs,**kwargs):
 	#---use the sigs list to select a test set
 	tests = instruct.get('tests',{})
 	keys = [key for key in tests if set(sigs)==set(key.split())]
-	if len(keys)!=1: raise Exception('cannot find a unique key in the testset for sigs %s: %s'%(sigs,tests.keys()))
+	if len(keys)!=1: 
+		raise Exception('cannot find a unique key in the testset for sigs %s: %s'%(sigs,tests.keys()))
 	else: name = keys[0]
 	docker_execute_local(config_fn=config_fn,**tests[name])	
 
@@ -153,7 +165,6 @@ def docker_execute_local(**kwargs):
 	"""
 	Run a testset on disk.
 	"""
-
 	#---check keys here
 	keys_docker_local = ('docker','where','script','config_fn')
 	keys_docker_local_opts = ('once','collect requirements','collect files',
@@ -167,7 +178,9 @@ def docker_execute_local(**kwargs):
 	#---default container user and site
 	kwargs['container_user'] = kwargs.get('container_user','biophyscode')
 	kwargs['container_site'] = kwargs.get('container_user','/root')
-	if len(choices)!=1: raise Exception(fail)
+	if len(choices)!=1: 
+		import ipdb;ipdb.set_trace()
+		raise Exception(fail)
 	if choices[0]=='docker_local': docker_local(**kwargs)
 	else: raise Exception(fail)
 
