@@ -23,6 +23,8 @@ def interpret_docker_instructions(config,mods=None):
 	"""
 	Read a docker configuration for running things in the docker.
 	"""
+	if os.path.basename(config)=='config.py':
+		raise Exception('you cannot call the config file "config.py" or we have an import failure')
 	#---import_remote wraps exec and discards builtins
 	from makeface import import_remote
 	if not os.path.isfile(config): raise Exception('cannot find %s'%config)
@@ -167,10 +169,12 @@ def docker_execute_local(**kwargs):
 	"""
 	#---check keys here
 	keys_docker_local = ('docker','where','script','config_fn')
+	keys_docker_local_visit = ('docker','where','visit','config_fn')
 	keys_docker_local_opts = ('once','collect requirements','collect files',
 		'notes','mounts','container_user','container_site')
 	keysets = {
-		(keys_docker_local,keys_docker_local_opts):'docker_local',}
+		(keys_docker_local,keys_docker_local_opts):'docker_local',
+		(keys_docker_local_visit,keys_docker_local_opts):'docker_local',}
 	choices = [val for key,val in keysets.items() if 
 		all([i in kwargs for i in key[0]]) and 
 		all([i in key[0]+key[1] for i in kwargs])]
@@ -231,7 +235,13 @@ def docker_local(**kwargs):
 		with open(script.name,'w') as fp: fp.write(kwargs['collect requirements'].replace('\\n', '\n'))
 		subprocess.check_call('bash %s'%fp.name,shell=True)
 	#---write the testset to the top directory. this is a transient file
-	with open(os.path.join(spot,'script-testset.sh'),'w') as fp: fp.write(kwargs['script'])
+	if 'script' in kwargs and kwargs.get('visit',False):
+		raise Exception('found script and visit')
+	elif 'script' in kwargs:
+		with open(os.path.join(spot,'script-testset.sh'),'w') as fp: fp.write(kwargs['script'])
+		testset_fn = 'script-testset.sh'
+	elif kwargs.get('visit',True): testset_fn = None
+	else: raise Exception('need either script or visit')
 	#---! by default we work in the home directory of the user. this needs documented
 	user = os.environ['USER']
 	container_site = os.path.join('/home/%s'%user)
@@ -240,15 +250,16 @@ def docker_local(**kwargs):
 	#---prepare the run settings
 	run_settings = dict(user=user,host_site=spot,
 		container_site=container_site,container_user=container_user,image=docker_name,
-		testset_file='script-testset.sh',mounts_extra='')
+		testset_file=testset_fn,mounts_extra='')
 	#---extra mounts
 	for mount_from,mount_to in kwargs.get('mounts',{}).items():
 		run_settings['mounts_extra'] += ' -v %s:%s'%(mount_from,os.path.join('/home/%s'%user,mount_to))
 	#---run the docker
-	cmd = ("docker run --rm -it "+
+	cmd = (("docker run --rm -it "+
 		"-u %(user)s -v %(host_site)s:%(container_site)s%(mounts_extra)s "+
-		"%(container_user)s/%(image)s "+
-		"bash %(container_site)s/%(testset_file)s")%run_settings
+		"%(container_user)s/%(image)s ")%run_settings+(
+		"bash %(container_site)s/%(testset_file)s"%run_settings
+			if run_settings['testset_file']!=None else ""))
 	subprocess.check_call(cmd,shell=True)
 	#---register this in the config if it runs only once
 	if do_once:
