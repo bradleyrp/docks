@@ -154,6 +154,7 @@ def test(*sigs,**kwargs):
 	build_dn = kwargs.pop('build','docker_builds')
 	username = kwargs.pop('username','biophyscode')
 	config_fn = kwargs.pop('config',None)
+	visit = kwargs.pop('visit',False)
 	if config_fn==None: config_fn = read_config().get('docks_config','docker_config.py')
 	mods_fn = kwargs.pop('mods',None)
 	if kwargs: raise Exception('unprocessed kwargs %s'%kwargs)
@@ -165,7 +166,7 @@ def test(*sigs,**kwargs):
 	if len(keys)!=1: 
 		raise Exception('cannot find a unique key in the testset for sigs %s: %s'%(sigs,tests.keys()))
 	else: name = keys[0]
-	docker_execute_local(config_fn=config_fn,**tests[name])	
+	docker_execute_local(config_fn=config_fn,visit=visit,**tests[name])	
 
 def docker_execute_local(**kwargs):
 	"""
@@ -175,7 +176,7 @@ def docker_execute_local(**kwargs):
 	keys_docker_local = ('docker','where','script','config_fn')
 	keys_docker_local_visit = ('docker','where','visit','config_fn')
 	keys_docker_local_opts = ('once','preliminary','collect files',
-		'notes','mounts','container_user','container_site')
+		'notes','mounts','container_user','container_site','visit')
 	keysets = {
 		(keys_docker_local,keys_docker_local_opts):'docker_local',
 		(keys_docker_local_visit,keys_docker_local_opts):'docker_local',}
@@ -238,7 +239,8 @@ def docker_local(**kwargs):
 		shutil.copyfile(os.path.join(os.path.dirname(config_fn),key),os.path.join(spot,val))
 	#---write the testset to the top directory. this is a transient file
 	if 'script' in kwargs and kwargs.get('visit',False):
-		raise Exception('found script and visit')
+		print('[WARNING] found visit so we are ignoring the script')
+		testset_fn = None
 	elif 'script' in kwargs:
 		script_header = '#!/bin/bash\nset -e\n\n'
 		with open(os.path.join(spot,'script-testset.sh'),'w') as fp: fp.write(script_header+kwargs['script'])
@@ -271,7 +273,7 @@ def docker_local(**kwargs):
 	#---clean up external mounts
 	#---! this is a rare delete command. add a confirm step?
 	for mount_dn in [os.path.join(spot,i) for i in kwargs.get('mounts',{}).values()]:
-		print('[STATUS] clearning docker mount directory %s'%mount_dn)
+		print('[STATUS] clearing docker mount directory %s'%mount_dn)
 		shutil.rmtree(mount_dn)
 	#---register this in the config if it runs only once
 	if do_once:
