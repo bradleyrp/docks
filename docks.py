@@ -58,10 +58,12 @@ def docker(name,config=None,mods=None,**kwargs):
 	build_dn = kwargs.pop('build','builds')
 	toc_fn = kwargs.pop('toc_fn','docker.json')
 	username = kwargs.pop('username','biophyscode')
-	if config==None: config = 'docker_config.py'
+	config_dict = read_config()
+	if config==None: config = config_dict.get('docks_config','docker_config.py')
 	if kwargs: raise Exception('unprocessed kwargs %s'%kwargs)
 	#---get the interpreted docker configuration
 	instruct = interpret_docker_instructions(config=config,mods=mods)
+	config = config_dict
 	#---the name is a sequence
 	if name not in instruct.get('sequences',{}): 
 		raise Exception('docker configuration lacks a sequence called %s'%name)
@@ -71,7 +73,6 @@ def docker(name,config=None,mods=None,**kwargs):
 	if os.path.isdir(build_dn): shutil.rmtree(build_dn)
 	os.mkdir(build_dn)
 	#---get the docker history
-	config = read_config()
 	docker_history = config.get('docker_history',{})
 	#---process all requirements before making the texts
 	reqs = instruct.get('requirements',{})
@@ -86,7 +87,7 @@ def docker(name,config=None,mods=None,**kwargs):
 			if len(key_path)!=1: raise Exception('not ready to do nested lookups. need to add delve back.')
 			if key_path[0] not in config:
 				raise Exception('failed to get item %s from the config dictionary.'%str(key_path)+msg)
-			spot = config[key_path]
+			spot = config[key_path[0]]
 			#---substitute in the dockerfile
 			if key not in instruct['dockerfiles']: raise Exception('cannot find %s in dockerfiles'%key)
 			instruct['dockerfiles'][key] = re.sub(val['filename_sub'],
@@ -152,7 +153,8 @@ def test(*sigs,**kwargs):
 	"""
 	build_dn = kwargs.pop('build','docker_builds')
 	username = kwargs.pop('username','biophyscode')
-	config_fn = kwargs.pop('config','docker_config.py')
+	config_fn = kwargs.pop('config',None)
+	if config_fn==None: config_fn = read_config().get('docks_config','docker_config.py')
 	mods_fn = kwargs.pop('mods',None)
 	if kwargs: raise Exception('unprocessed kwargs %s'%kwargs)
 	#---get the interpreted docker configuration
@@ -238,7 +240,8 @@ def docker_local(**kwargs):
 	if 'script' in kwargs and kwargs.get('visit',False):
 		raise Exception('found script and visit')
 	elif 'script' in kwargs:
-		with open(os.path.join(spot,'script-testset.sh'),'w') as fp: fp.write(kwargs['script'])
+		script_header = '#!/bin/bash\nset-e\n\n'
+		with open(os.path.join(spot,'script-testset.sh'),'w') as fp: fp.write(script_header+kwargs['script'])
 		testset_fn = 'script-testset.sh'
 	elif kwargs.get('visit',True): testset_fn = None
 	else: raise Exception('need either script or visit')
@@ -261,6 +264,15 @@ def docker_local(**kwargs):
 		"bash %(container_site)s/%(testset_file)s"%run_settings
 			if run_settings['testset_file']!=None else ""))
 	subprocess.check_call(cmd,shell=True)
+	#---clean up the testset script
+	if testset_fn!=None: 
+		try: os.remove(os.path.join(spot,testset_fn))
+		except: pass
+	#---clean up external mounts
+	#---! this is a rare delete command. add a confirm step?
+	for mount_dn in [os.path.join(spot,i) for i in kwargs.get('mounts',{}).values()]:
+		print('[STATUS] clearning docker mount directory %s'%mount_dn)
+		shutil.rmtree(mount_dn)
 	#---register this in the config if it runs only once
 	if do_once:
 		testset_history['events'] = testset_history.get('events',[])
