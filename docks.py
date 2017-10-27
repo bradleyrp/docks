@@ -240,7 +240,7 @@ def docker_local(**kwargs):
 	if 'script' in kwargs and kwargs.get('visit',False):
 		raise Exception('found script and visit')
 	elif 'script' in kwargs:
-		script_header = '#!/bin/bash\nset-e\n\n'
+		script_header = '#!/bin/bash\nset -e\n\n'
 		with open(os.path.join(spot,'script-testset.sh'),'w') as fp: fp.write(script_header+kwargs['script'])
 		testset_fn = 'script-testset.sh'
 	elif kwargs.get('visit',True): testset_fn = None
