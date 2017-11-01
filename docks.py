@@ -115,10 +115,13 @@ def docker(name,config=None,mods=None,**kwargs):
 	#---never rebuild if unnecessary (docker builds are extremely quick but why waste the time)
 	#---we use the texts of the docker instead of timestamps, since users might be updating other parts 
 	#---...of the config file pretty frequently
-	if name in docker_history.keys():
-		if docker_history[name]['texts']==texts:
-			raise Exception(('the docker called "%s" has already been built '+
-				'and the instructions have not changed')%name)
+	if docker_history.keys():
+		keys = sorted([i for i in docker_history.keys() if i[0]==name])
+		if keys:
+			if docker_history[keys[-1]]['texts']==texts:
+				print(('[STATUS] the docker called "%s" has already been built '+
+					'and the instructions have not changed')%name)
+				return
 	#---record the history for docker_history
 	updates,total_time = [],0.0
 	#---loop over stages, each of which gets a separate image
@@ -204,7 +207,7 @@ def docker_execute_local(**kwargs):
 
 def docker_local(**kwargs):
 	"""
-	Use one of the dockers we have prepared to 
+	Use a prepared docker to run some code.
 	"""
 	config_fn = kwargs.pop('config_fn','docker_config.py')
 	mods_fn = kwargs.pop('mods_fn',None)
@@ -214,10 +217,8 @@ def docker_local(**kwargs):
 	testset_history = config.get('testset_history',{})
 	#---check if the docker is ready
 	docker_name = kwargs.get('docker')
-	#---if the docker has never been made we make it
-	#---! this does not handle the possibility that the texts have changed
-	if docker_name not in docker_history: 
-		docker(name=docker_name,config=config_fn,mods=mods_fn)
+	#---call docker which only builds if the docker is not stored in the history
+	docker(name=docker_name,config=config_fn,mods=mods_fn)
 	#---check for once
 	do_once = kwargs.get('once',False)
 	#---check for an identical event in the testset history
@@ -276,7 +277,7 @@ def docker_local(**kwargs):
 	#---run the docker
 	cmd = (("docker run %s"%('--rm -it ' 
 		if (kwargs.get('background',False)==False or kwargs.get('visit',True)) else '-d ')+
-		"-u %(user)s -v %(host_site)s:%(container_site)s%(mounts_extra)s%(ports)s"+
+		"-u %(user)s -v %(host_site)s:%(container_site)s%(mounts_extra)s%(ports)s "+
 		"%(container_user)s/%(image)s ")%run_settings+(
 		"bash %(container_site)s/%(testset_file)s"%run_settings
 			if run_settings['testset_file']!=None else ""))
