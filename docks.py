@@ -6,10 +6,13 @@ Adapted from omicron/pier/deploy.py.
 Example configurations not included.
 """
 
-__all__ = ['docker','test','docker_list']
+__all__ = ['docker','test','docker_list','docker_recap','test_report']
 
 import os,sys,re,tempfile,subprocess,shutil,time,json,pwd,datetime,copy,grp
 str_types = [str,unicode] if sys.version_info<(3,0) else [str]
+
+#---! container_user is hardcoded here and in the defaults for building the docker
+container_user = 'biophyscode'
 
 #---import for skunkworks
 try: from makeface import write_config,read_config
@@ -57,7 +60,7 @@ def docker(name,config=None,mods=None,**kwargs):
 	"""
 	build_dn = kwargs.pop('build','builds')
 	toc_fn = kwargs.pop('toc_fn','docker.json')
-	username = kwargs.pop('username','biophyscode')
+	username = kwargs.pop('username',container_user)
 	config_dict = read_config()
 	if config==None: config = config_dict.get('docks_config','docker_config.py')
 	if kwargs: raise Exception('unprocessed kwargs %s'%kwargs)
@@ -117,7 +120,7 @@ def docker(name,config=None,mods=None,**kwargs):
 			raise Exception(('the docker called "%s" has already been built '+
 				'and the instructions have not changed')%name)
 	#---record the history for docker_history
-	updates = {name:[]}
+	updates,total_time = [],0.0
 	#---loop over stages, each of which gets a separate image
 	for stage,(stage_name,text) in enumerate(texts):
 		start_time = time.time()
@@ -138,12 +141,15 @@ def docker(name,config=None,mods=None,**kwargs):
 			os.path.join(build_dn,''))
 		print('[STATUS] running "%s"'%cmd)
 		subprocess.check_call(cmd,shell=True)
-		elapsed = '%.1f min'%((time.time()-start_time)/60.)
+		elapsed_sec = time.time() - start_time
+		total_time += elapsed_sec
+		elapsed = '%.1f min'%(elapsed_sec/60.)
 		print('[TIME] elapsed: %s'%elapsed)
-		updates[name].append(dict(stage=stage,name=stage_name,image=image_name,elapsed=elapsed))
+		updates.append(dict(name=stage_name,image=image_name,elapsed=elapsed_sec))
 	ts = datetime.datetime.fromtimestamp(time.time()).strftime('%Y.%m.%d.%H%M')
 	#---save to the history with a docker style in contrast to a test style
-	docker_history[name] = dict(style='docker',when=ts,series=updates,texts=texts)
+	#---since we only save at the end, a failure means no times get written
+	docker_history[(name,ts)] = dict(series=updates,texts=texts,total_time=total_time)
 	config.update(docker_history=docker_history)
 	write_config(config)
 
@@ -151,8 +157,13 @@ def test(*sigs,**kwargs):
 	"""
 	Run a testset in a docker.
 	"""
+	prepped = test_run(*sigs,**kwargs)
+	docker_execute_local(**prepped)	
+
+def test_run(*sigs,**kwargs):
+	"""Prepare the test for running or reporting."""
 	build_dn = kwargs.pop('build','docker_builds')
-	username = kwargs.pop('username','biophyscode')
+	username = kwargs.pop('username',container_user)
 	config_fn = kwargs.pop('config',None)
 	visit = kwargs.pop('visit',False)
 	if config_fn==None: config_fn = read_config().get('docks_config','docker_config.py')
@@ -166,7 +177,7 @@ def test(*sigs,**kwargs):
 	if len(keys)!=1: 
 		raise Exception('cannot find a unique key in the testset for sigs %s: %s'%(sigs,tests.keys()))
 	else: name = keys[0]
-	docker_execute_local(config_fn=config_fn,visit=visit,**tests[name])	
+	return dict(config_fn=config_fn,visit=visit,**tests[name])
 
 def docker_execute_local(**kwargs):
 	"""
@@ -175,7 +186,7 @@ def docker_execute_local(**kwargs):
 	#---check keys here
 	keys_docker_local = ('docker','where','script','config_fn')
 	keys_docker_local_visit = ('docker','where','visit','config_fn')
-	keys_docker_local_opts = ('once','preliminary','collect files',
+	keys_docker_local_opts = ('once','preliminary','collect files','report files',
 		'notes','mounts','container_user','container_site','visit','ports','background')
 	keysets = {
 		(keys_docker_local,keys_docker_local_opts):'docker_local',
@@ -185,7 +196,7 @@ def docker_execute_local(**kwargs):
 		all([i in key[0]+key[1] for i in kwargs])]
 	fail = 'docker_execute_local failed to route these instructions: %s'%kwargs
 	#---default container user and site
-	kwargs['container_user'] = kwargs.get('container_user','biophyscode')
+	kwargs['container_user'] = kwargs.get('container_user',container_user)
 	kwargs['container_site'] = kwargs.get('container_user','/root')
 	if len(choices)!=1: raise Exception(fail)
 	if choices[0]=='docker_local': docker_local(**kwargs)
@@ -232,7 +243,8 @@ def docker_local(**kwargs):
 	if 'preliminary' in kwargs:
 		import tempfile
 		script = tempfile.NamedTemporaryFile(delete=True)
-		with open(script.name,'w') as fp: fp.write(kwargs['preliminary'].replace('\\n', '\n'))
+		script_header = '#!/bin/bash\nset -e\n\n'
+		with open(script.name,'w') as fp: fp.write(script_header+kwargs['preliminary'])
 		subprocess.check_call('bash %s'%fp.name,shell=True)
 	#---collect local files
 	for key,val in kwargs.get('collect files',{}).items():
@@ -243,15 +255,14 @@ def docker_local(**kwargs):
 		testset_fn = None
 	elif 'script' in kwargs:
 		script_header = '#!/bin/bash\nset -e\n\n'
-		with open(os.path.join(spot,'script-testset.sh'),'w') as fp: fp.write(script_header+kwargs['script'])
+		with open(os.path.join(spot,'script-testset.sh'),'w') as fp: 
+			fp.write(script_header+kwargs['script'])
 		testset_fn = 'script-testset.sh'
 	elif kwargs.get('visit',True): testset_fn = None
 	else: raise Exception('need either script or visit')
 	#---! by default we work in the home directory of the user. this needs documented
 	user = os.environ['USER']
 	container_site = os.path.join('/home/%s'%user)
-	#---! container_user is hardcoded here and in the defaults for building the docker
-	container_user = 'biophyscode'
 	#---prepare the run settings
 	run_settings = dict(user=user,host_site=spot,
 		container_site=container_site,container_user=container_user,image=docker_name,
@@ -289,3 +300,76 @@ def docker_local(**kwargs):
 		testset_history['events'].append(event)
 		config.update(testset_history=testset_history)
 		write_config(config)
+
+def docker_recap(longest=True):
+	"""Summarize docker compile times."""
+	config = read_config()
+	from datapack import asciitree
+	docker_history = config.get('docker_history',{})
+	keys = list(set([i[0] for i in docker_history]))
+	timings = dict([(key,{}) for key in keys])
+	for key in keys:
+		stamps = [i[1] for i in docker_history if i[0]==key]
+		timings[key]['timings'] = dict([(s,'%.1f min'%
+			(docker_history[(key,s)]['total_time']/60.)) for s in stamps])
+		timings[key]['sub-timings'] = ['%s, %.1f min'%(s['name'],s['elapsed']/60.) 
+			for s in docker_history[(key,s)]['series']]
+		timings[key]['longest'] = max(timings[key]['timings'].values())
+	asciitree(timings)
+
+def test_report(*sigs,**kwargs):
+	"""Write a report for a specific testset to a file."""
+	import textwrap
+	liner = lambda x,indent=0,indent_sub=2: '\n'.join(
+		textwrap.wrap(x,width=110-indent,subsequent_indent=' '*indent_sub))
+	formatter = lambda title,*x: '%s\n'%title+'\n'.join(['%s%s'%(
+		' '*2,liner(i,indent=2,indent_sub=4)) for i in x])
+	#---get the testset instructions
+	prepped = test_run(*sigs,**kwargs)
+	#---generate timestamp
+	ts = datetime.datetime.fromtimestamp(time.time()).strftime('%Y.%m.%d.%H%M')
+	text = ['# FACTORY TESTSET REPORT: "%s"'%'_'.join(sigs)]
+	text += ['This report was generated on: %s.'%ts]
+	#---start with notes
+	notes = prepped.get('notes',None)
+	if notes: text += ['> NOTES:\n%s'%'\n'.join(['  %s'%i for i in notes.strip().splitlines()])]
+	#---tell the user how to run it
+	text += ['RUN COMMAND: `make test %s`'%' '.join(sigs)]
+	#---handle once flag
+	if prepped.get('once',False): text += [formatter('SINGLE USE:',
+		'This testset runs once and is then recorded in the `factory/config.py` variable ',
+		'called "testset_history" so that it is not repeated.')]
+	#---report the docker
+	text += [formatter('DOCKER IMAGE:',
+		'This testset uses the docker image "%s/%s".'%(container_user,prepped['docker']),
+		'See available images with `docker images`.')]
+	#---location on disk
+	where = prepped.get('where',False)
+	if where: text += [formatter('LOCATION:','This docker is mounted to the host disk at `%s`.'%where)]
+	#---files that get copied
+	collect_files = prepped.get('collect files',{})
+	if collect_files:
+		text += [formatter('COPY FILES:',
+			'The following files are copied from the host to the user directory in the container.',
+			*[' '*2+'%s > %s'%(k,v) for k,v in collect_files.items()])]
+	#---write preliminary script
+	prelim = prepped.get('preliminary',False)
+	if prelim: text += [formatter('PRELIMINARY SCRIPT (runs in the host):\n',
+		'#!/bin/bash','set -e',*prelim.splitlines())]
+	#---write the main script
+	script = prepped.get('script',False)
+	if script: text += [formatter('MAIN SCRIPT (runs in the container):\n',
+		'#!/bin/bash','set -e',*script.splitlines())]
+	#---reproduce other files
+	report_files = prepped.get('report files',None)
+	if report_files:
+		#---get location of the testset sources via the docks_config
+		config = read_config()
+		if 'docks_config' not in config: raise Exception('cannot find docks_config')
+		for fn in report_files:
+			with open(os.path.join(os.path.dirname(config['docks_config']),fn)) as fp:
+				text += ['## file contents: "%s"\n\n~~~\n%s\n~~~'%(fn,fp.read().strip())]
+	#---write the report
+	fn = 'report-%s.md'%('_'.join(sigs))
+	with open(fn,'w') as fp: fp.write('\n\n'.join(text))
+	print('[STATUS] write report to %s'%fn)
