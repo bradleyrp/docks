@@ -176,7 +176,7 @@ def docker_execute_local(**kwargs):
 	keys_docker_local = ('docker','where','script','config_fn')
 	keys_docker_local_visit = ('docker','where','visit','config_fn')
 	keys_docker_local_opts = ('once','preliminary','collect files',
-		'notes','mounts','container_user','container_site','visit')
+		'notes','mounts','container_user','container_site','visit','ports','background')
 	keysets = {
 		(keys_docker_local,keys_docker_local_opts):'docker_local',
 		(keys_docker_local_visit,keys_docker_local_opts):'docker_local',}
@@ -259,12 +259,17 @@ def docker_local(**kwargs):
 	#---extra mounts
 	for mount_from,mount_to in kwargs.get('mounts',{}).items():
 		run_settings['mounts_extra'] += ' -v %s:%s'%(mount_from,os.path.join('/home/%s'%user,mount_to))
+	run_settings['ports'] = ' '.join(['--publish=%d:%d'%((p,p) if type(p)==int 
+		else tuple(p)) for p in kwargs.get('ports',[])])
+	if run_settings['ports']!='': run_settings['ports'] = ' %s '%run_settings['ports']
 	#---run the docker
-	cmd = (("docker run --rm -it "+
-		"-u %(user)s -v %(host_site)s:%(container_site)s%(mounts_extra)s "+
+	cmd = (("docker run %s"%('--rm -it ' 
+		if (kwargs.get('background',False)==False or kwargs.get('visit',True)) else '-d ')+
+		"-u %(user)s -v %(host_site)s:%(container_site)s%(mounts_extra)s%(ports)s"+
 		"%(container_user)s/%(image)s ")%run_settings+(
 		"bash %(container_site)s/%(testset_file)s"%run_settings
 			if run_settings['testset_file']!=None else ""))
+	print('[STATUS] calling docker via: %s'%cmd)
 	subprocess.check_call(cmd,shell=True)
 	#---clean up the testset script
 	if testset_fn!=None: 
