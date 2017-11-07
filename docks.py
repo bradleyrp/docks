@@ -54,10 +54,13 @@ def get_docker_toc(toc_fn):
 	toc = {} if not os.path.isfile(toc_fn) else json.load(open(toc_fn))
 	return toc
 
-def docker(name,config=None,mods=None,**kwargs):
+def docker(name,config=None,report=None,series=0,mods=None,**kwargs):
 	"""
 	Manage the DOCKER.
 	"""
+	#---we use series numbers to version the changes to this function. note that series 0 is current 
+	#---...while series 1 used a user addition at the end of each docker creation which is now farmed to the
+	#---...docker config for slightly more control
 	build_dn = kwargs.pop('build','builds')
 	toc_fn = kwargs.pop('toc_fn','docker.json')
 	username = kwargs.pop('username',container_user)
@@ -70,7 +73,7 @@ def docker(name,config=None,mods=None,**kwargs):
 	#---the name is a sequence
 	if name not in instruct.get('sequences',{}): 
 		raise Exception('docker configuration lacks a sequence called %s'%name)
-	seq = instruct['sequences'][name]
+	seqspec = instruct['sequences'][name]
 	#---prepare a build directory
 	#---! safe to always delete first?
 	if os.path.isdir(build_dn): shutil.rmtree(build_dn)
@@ -100,6 +103,13 @@ def docker(name,config=None,mods=None,**kwargs):
 			#---we always have to copy the file to the docker build directory
 			shutil.copyfile(spot,os.path.join(build_dn,os.path.basename(spot)))
 		else: raise Exception('cannot get requirement for %s: %s'%(key,val))
+	#---we allow the sequence to be a dictionary (extra features) or a string (default)
+	if type(seqspec) in str_types: seqspec = {'seq':seqspec}
+	#---defaults and extra settings passed through a sequence dictionary
+	seq = seqspec['seq']
+	user_coda = seqspec.get('user',False)
+	coda = seqspec.get('coda',None)
+	if coda!=None and user_coda==False: raise Exception('cannot allow a coda if not user')
 	#---prepare the texts of the dockerfiles
 	steps = seq.split()
 	texts = [(step,instruct['dockerfiles'][step]) for step in steps]
@@ -107,11 +117,19 @@ def docker(name,config=None,mods=None,**kwargs):
 	this_user = pwd.getpwnam(os.environ['USER'])
 	this_user_details = {'gid':this_user.pw_gid,'uid':this_user.pw_uid,'user':os.environ['USER']}
 	this_user_details.update(gname=grp.getgrgid(this_user_details['gid']).gr_name)
-	#---! note that debian comes with a group "users" so we use groupmod but this might not be true on all
-	texts += [('su',
-		"RUN groupmod -g %(gid)d %(gname)s\n"%this_user_details+
-		"RUN useradd -m -u %(uid)d -g %(gid)d %(user)s\nUSER %(user)s\nWORKDIR /home/%(user)s\n"
-		%this_user_details)]
+	#---at the end of each run we set the user so that permissions work properly and dockers are run as user
+	if user_coda:
+		texts += [('su',
+			"RUN groupmod -g %(gid)d %(gname)s\n"%this_user_details+
+			"RUN useradd -m -u %(uid)d -g %(gid)d %(user)s\nUSER %(user)s\nWORKDIR /home/%(user)s\n"
+			%this_user_details)]
+	#---commands to run after setting the user
+	if coda!=None: texts += [('coda',coda)]
+	#---if we are reporting then write the file and exit
+	if report!=None:
+		with open(report,'w') as fp:
+			fp.write('\n'.join(list(zip(*texts))[1]))
+		return
 	#---never rebuild if unnecessary (docker builds are extremely quick but why waste the time)
 	#---we use the texts of the docker instead of timestamps, since users might be updating other parts 
 	#---...of the config file pretty frequently
@@ -263,7 +281,7 @@ def docker_local(**kwargs):
 	else: raise Exception('need either script or visit')
 	#---! by default we work in the home directory of the user. this needs documented
 	user = os.environ['USER']
-	container_site = os.path.join('/home/%s'%user)
+	container_site = os.path.join('/','home',user,'host')
 	#---prepare the run settings
 	run_settings = dict(user=user,host_site=spot,
 		container_site=container_site,container_user=container_user,image=docker_name,
@@ -289,9 +307,9 @@ def docker_local(**kwargs):
 		except: pass
 	#---clean up external mounts
 	#---! this is a rare delete command. add a confirm step?
-	for mount_dn in [os.path.join(spot,i) for i in kwargs.get('mounts',{}).values()]:
-		print('[STATUS] clearing docker mount directory %s'%mount_dn)
-		shutil.rmtree(mount_dn)
+	#for mount_dn in [os.path.join(spot,'host',i) for i in kwargs.get('mounts',{}).values()]:
+	#	print('[STATUS] clearing docker mount directory %s'%mount_dn)
+	#	shutil.rmtree(mount_dn)
 	#---register this in the config if it runs only once
 	if do_once:
 		testset_history['events'] = testset_history.get('events',[])
@@ -346,7 +364,7 @@ def test_report(*sigs,**kwargs):
 		'See available images with `docker images`.')]
 	#---location on disk
 	where = prepped.get('where',False)
-	if where: text += [formatter('LOCATION:','This docker is mounted to the host disk at `%s`.'%where)]
+	if where: text += [formatter('LOCATION:','This docker is mounted to the host disk at `host/%s`.'%where)]
 	#---files that get copied
 	collect_files = prepped.get('collect files',{})
 	if collect_files:
