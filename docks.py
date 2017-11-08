@@ -54,7 +54,7 @@ def get_docker_toc(toc_fn):
 	toc = {} if not os.path.isfile(toc_fn) else json.load(open(toc_fn))
 	return toc
 
-def docker(name,config=None,report=None,series=0,mods=None,**kwargs):
+def docker(name,config=None,report=None,sequential=True,series=0,mods=None,**kwargs):
 	"""
 	Manage the DOCKER.
 	"""
@@ -142,34 +142,58 @@ def docker(name,config=None,report=None,series=0,mods=None,**kwargs):
 				return
 	#---record the history for docker_history
 	updates,total_time = [],0.0
-	#---loop over stages, each of which gets a separate image
-	for stage,(stage_name,text) in enumerate(texts):
+	#---in the sequential method we generate larger dockerfiles from small ones so that adding
+	#---...to the end of a long dockerfile resumes at the previous image. since the sequential dockerfiles 
+	#---...are always built in the same way, this saves time
+	#---! I am skeptical that this feature is not already in docker, but it is simple enough to implement
+	#---! note that the images get cluttered by the stages for each sequential docker end in name-sN so
+	#---! ...they are easy to clean up with docker rmi $(docker images | awk '$1 ~ /-s/ {print $3}')
+	if sequential:
+		#---loop over stages, each of which gets a separate image
+		for stage,(stage_name,text) in enumerate(texts):
+			start_time = time.time()
+			#---prepare names
+			print('[STATUS] processing %s, stage %d: %s'%(name,stage,stage_name))
+			#---subsequent stages depend on the previous one so we prepend it
+			if stage>0: text = 'FROM %s/%s\n'%(username,image_name)+text
+			image_name = '%s-s%d'%(name,stage)
+			if stage==len(texts)-1: image_name = name
+			print('[STATUS] image name: %s'%image_name)
+			print('\n'.join(['[CONFIG] | %s'%i for i in text.splitlines()]))
+			docker_fn = os.path.join(build_dn,'Dockerfile-%s'%image_name)
+			#---write the docker file
+			with open(docker_fn,'w') as fp: fp.write(text)
+			#---generate the image
+			cmd = 'docker build -t %s/%s -f %s %s'%(
+				username,image_name,docker_fn,
+				os.path.join(build_dn,''))
+			print('[STATUS] running "%s"'%cmd)
+			subprocess.check_call(cmd,shell=True)
+			elapsed_sec = time.time() - start_time
+			total_time += elapsed_sec
+			elapsed = '%.1f min'%(elapsed_sec/60.)
+			print('[TIME] elapsed: %s'%elapsed)
+			updates.append(dict(name=stage_name,image=image_name,elapsed=elapsed_sec))
+	#---non-sequential method
+	else:
 		start_time = time.time()
-		#---prepare names
-		print('[STATUS] processing %s, stage %d: %s'%(name,stage,stage_name))
-		#---subsequent stages depend on the previous one so we prepend it
-		if stage>0: text = 'FROM %s/%s\n'%(username,image_name)+text
-		image_name = '%s-s%d'%(name,stage)
-		if stage==len(texts)-1: image_name = name
-		print('[STATUS] image name: %s'%image_name)
-		print('\n'.join(['[CONFIG] | %s'%i for i in text.splitlines()]))
-		docker_fn = os.path.join(build_dn,'Dockerfile-%s'%image_name)
+		image_name = name
+		text = '\n'.join(list(zip(*texts))[1])
+		docker_fn = os.path.join(build_dn,'Dockerfile-%s'%name)
 		#---write the docker file
 		with open(docker_fn,'w') as fp: fp.write(text)
-		#---generate the image
 		cmd = 'docker build -t %s/%s -f %s %s'%(
 			username,image_name,docker_fn,
 			os.path.join(build_dn,''))
-		print('[STATUS] running "%s"'%cmd)
 		subprocess.check_call(cmd,shell=True)
 		elapsed_sec = time.time() - start_time
 		total_time += elapsed_sec
 		elapsed = '%.1f min'%(elapsed_sec/60.)
 		print('[TIME] elapsed: %s'%elapsed)
-		updates.append(dict(name=stage_name,image=image_name,elapsed=elapsed_sec))
-	ts = datetime.datetime.fromtimestamp(time.time()).strftime('%Y.%m.%d.%H%M')
+		updates.append(dict(name='everything',image=image_name,elapsed=elapsed_sec))
 	#---save to the history with a docker style in contrast to a test style
 	#---since we only save at the end, a failure means no times get written
+	ts = datetime.datetime.fromtimestamp(time.time()).strftime('%Y.%m.%d.%H%M')
 	docker_history[(name,ts)] = dict(series=updates,texts=texts,total_time=total_time)
 	config.update(docker_history=docker_history)
 	write_config(config)
@@ -208,7 +232,7 @@ def docker_execute_local(**kwargs):
 	keys_docker_local = ('docker','where','script','config_fn')
 	keys_docker_local_visit = ('docker','where','visit','config_fn')
 	keys_docker_local_opts = ('once','preliminary','collect files','report files',
-		'notes','mounts','container_user','container_site','visit','ports','background')
+		'notes','mounts','container_user','container_site','visit','ports','background','write files')
 	keysets = {
 		(keys_docker_local,keys_docker_local_opts):'docker_local',
 		(keys_docker_local_visit,keys_docker_local_opts):'docker_local',}
@@ -265,6 +289,11 @@ def docker_local(**kwargs):
 		script_header = '#!/bin/bash\nset -e\n\n'
 		with open(script.name,'w') as fp: fp.write(script_header+kwargs['preliminary'])
 		subprocess.check_call('bash %s'%fp.name,shell=True)
+	#---you can embed some files directly in the YAML (this is useful for files that change ports)
+	write_files = kwargs.get('write files',{})
+	if write_files:
+		for fn,text in write_files.items():
+			with open(os.path.join(os.path.dirname(config['docks_config']),fn),'w') as fp: fp.write(text)
 	#---collect local files
 	for key,val in kwargs.get('collect files',{}).items():
 		shutil.copyfile(os.path.join(os.path.dirname(config_fn),key),os.path.join(spot,val))
@@ -273,10 +302,13 @@ def docker_local(**kwargs):
 		print('[WARNING] found visit so we are ignoring the script')
 		testset_fn = None
 	elif 'script' in kwargs:
-		script_header = '#!/bin/bash\nset -e\n\n'
-		with open(os.path.join(spot,'script-testset.sh'),'w') as fp: 
+		ts = datetime.datetime.fromtimestamp(time.time()).strftime('%Y.%m.%d.%H%M')
+		testset_fn = 'script-run-%s.sh'%ts
+		script_header = ('#!/bin/bash\nset -e\n'+
+			'log_file=%s\n'%('log-run-%s'%ts)+
+			'exec &> >(tee -a "$log_file")'+'\n\n')
+		with open(os.path.join(spot,testset_fn),'w') as fp: 
 			fp.write(script_header+kwargs['script'])
-		testset_fn = 'script-testset.sh'
 	elif kwargs.get('visit',True): testset_fn = None
 	else: raise Exception('need either script or visit')
 	#---! by default we work in the home directory of the user. this needs documented
@@ -305,11 +337,7 @@ def docker_local(**kwargs):
 	if testset_fn!=None: 
 		try: os.remove(os.path.join(spot,testset_fn))
 		except: pass
-	#---clean up external mounts
-	#---! this is a rare delete command. add a confirm step?
-	#for mount_dn in [os.path.join(spot,'host',i) for i in kwargs.get('mounts',{}).values()]:
-	#	print('[STATUS] clearing docker mount directory %s'%mount_dn)
-	#	shutil.rmtree(mount_dn)
+	#---it is no longer necessary to clean up external mounts if they are mounted in ~/host/
 	#---register this in the config if it runs only once
 	if do_once:
 		testset_history['events'] = testset_history.get('events',[])
@@ -365,6 +393,11 @@ def test_report(*sigs,**kwargs):
 	#---location on disk
 	where = prepped.get('where',False)
 	if where: text += [formatter('LOCATION:','This docker is mounted to the host disk at `host/%s`.'%where)]
+	#---you can embed some files directly in the YAML (this is useful for files that change ports)
+	write_files = prepped.get('write files',{})
+	if write_files:
+		for fn,text in write_files.items():
+			with open(os.path.join(os.path.dirname(config['docks_config']),fn),'w') as fp: fp.write(text)
 	#---files that get copied
 	collect_files = prepped.get('collect files',{})
 	if collect_files:
