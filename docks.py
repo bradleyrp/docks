@@ -6,7 +6,7 @@ Adapted from omicron/pier/deploy.py.
 Example configurations not included.
 """
 
-__all__ = ['docker','test','docker_list','docker_recap','test_report']
+__all__ = ['docker','test','docker_list','docker_recap','test_report','avail']
 
 import os,sys,re,tempfile,subprocess,shutil,time,json,pwd,datetime,copy,grp
 str_types = [str,unicode] if sys.version_info<(3,0) else [str]
@@ -298,10 +298,7 @@ def docker_local(**kwargs):
 	for key,val in kwargs.get('collect files',{}).items():
 		shutil.copyfile(os.path.join(os.path.dirname(config_fn),key),os.path.join(spot,val))
 	#---write the testset to the top directory. this is a transient file
-	if 'script' in kwargs and kwargs.get('visit',False):
-		print('[WARNING] found visit so we are ignoring the script')
-		testset_fn = None
-	elif 'script' in kwargs:
+	if 'script' in kwargs:
 		ts = datetime.datetime.fromtimestamp(time.time()).strftime('%Y.%m.%d.%H%M')
 		testset_fn = 'script-run-%s.sh'%ts
 		script_header = ('#!/bin/bash\nset -e\n'+
@@ -317,7 +314,7 @@ def docker_local(**kwargs):
 	#---prepare the run settings
 	run_settings = dict(user=user,host_site=spot,
 		container_site=container_site,container_user=container_user,image=docker_name,
-		testset_file=testset_fn,mounts_extra='')
+		testset_file=testset_fn if not kwargs.get('visit',True) else None,mounts_extra='')
 	#---extra mounts
 	for mount_from,mount_to in kwargs.get('mounts',{}).items():
 		run_settings['mounts_extra'] += ' -v %s:%s'%(mount_from,os.path.join('/home/%s'%user,mount_to))
@@ -425,3 +422,17 @@ def test_report(*sigs,**kwargs):
 	fn = 'report-%s.md'%('_'.join(sigs))
 	with open(fn,'w') as fp: fp.write('\n\n'.join(text))
 	print('[STATUS] write report to %s'%fn)
+
+def avail(config=None,mods=None,**kwargs):
+	"""List available tests."""
+	#! the following sequence is somewhat redundant elsewhere
+	build_dn = kwargs.pop('build','builds')
+	toc_fn = kwargs.pop('toc_fn','docker.json')
+	username = kwargs.pop('username',container_user)
+	config_dict = read_config()
+	if config==None: config = config_dict.get('docks_config','docker_config.py')
+	if kwargs: raise Exception('unprocessed kwargs %s'%kwargs)
+	# get the interpreted docker configuration
+	instruct = interpret_docker_instructions(config=config,mods=mods)
+	from datapack import asciitree	
+	asciitree(dict(tests=instruct.get('tests',{}).keys()))
