@@ -6,7 +6,8 @@ Adapted from omicron/pier/deploy.py.
 Example configurations not included.
 """
 
-__all__ = ['docker','test','docker_list','docker_recap','test_report','avail']
+__all__ = ['docker','test','docker_list','docker_recap','test_report','avail',
+	'gitscan','gitcheck','megatest']
 
 import os,sys,re,tempfile,subprocess,shutil,time,json,pwd,datetime,copy,grp
 str_types = [str,unicode] if sys.version_info<(3,0) else [str]
@@ -215,8 +216,39 @@ def test(*sigs,**kwargs):
 	"""
 	Run a testset in a docker.
 	"""
+	collect_log = kwargs.pop('log',False)
+	do_wait = kwargs.pop('wait',False)
 	prepped = test_run(*sigs,**kwargs)
-	docker_execute_local(**prepped)	
+	container_name = '_'.join(sigs)
+	prepped['container_name'] = container_name
+	prepped['wait'] = do_wait
+	respond = docker_execute_local(**prepped)
+	# manage proof of work for a completed test here
+	#! options for storing proof are: in config (possibly testset_history) or custom
+	if collect_log and do_wait:
+		# CUSTOM STRUCTURE FOR RECORDING TESTS
+		if not os.path.isdir('logs'): os.mkdir('logs')
+		# get the docker log
+		try: 
+			#! replace with check_call
+			log_fn = 'logs/%s.log'%(container_name)
+			os.system('docker logs %s &> %s'%(container_name,log_fn))
+			print('[STATUS] wrote docker logs for %s to %s'%(container_name,log_fn))
+		except: print('[WARNING] failed to collect logs for container %s'%container_name)
+		# get the script
+		script_fn = os.path.join(respond['spot'],respond['script'])
+		if not os.path.isfile(script_fn):
+			print('[WARNING] cannot collect script %s'%script_fn)
+		else:
+			script_out = os.path.join('logs','%s.script.sh'%(container_name))
+			shutil.move(script_fn,script_out)
+			print('[STATUS] moved script to %s'%script_out)
+	#! remove the container if we waited for it now that we should have logs
+	if do_wait:
+		try:
+			print('[STATUS] clearing container') 
+			os.system('docker rm %s'%container_name)
+		except: print('[WARNING] failed to remove container %s'%container_name)
 
 def test_run(*sigs,**kwargs):
 	"""Prepare the test for running or reporting."""
@@ -226,6 +258,8 @@ def test_run(*sigs,**kwargs):
 	visit = kwargs.pop('visit',False)
 	if config_fn==None: config_fn = read_config().get('docks_config','docker_config.py')
 	mods_fn = kwargs.pop('mods',None)
+	backrun = kwargs.pop('back',False)
+	dump_raw_test = kwargs.pop('dump_raw_test',None)
 	if kwargs: raise Exception('unprocessed kwargs %s'%kwargs)
 	# get the interpreted docker configuration
 	instruct = interpret_docker_instructions(config=config_fn,mods=mods_fn)
@@ -235,7 +269,11 @@ def test_run(*sigs,**kwargs):
 	if len(keys)!=1: 
 		raise Exception('cannot find a unique key in the testset for sigs %s: %s'%(sigs,tests.keys()))
 	else: name = keys[0]
-	return dict(config_fn=config_fn,visit=visit,**tests[name])
+	if dump_raw_test:
+		import yaml
+		with open(dump_raw_test,'w') as fp:
+			yaml.dump(tests[name],fp,default_flow_style=False,default_style='|')
+	return dict(config_fn=config_fn,background=backrun,visit=visit,**tests[name])
 
 def docker_execute_local(**kwargs):
 	"""
@@ -245,7 +283,8 @@ def docker_execute_local(**kwargs):
 	keys_docker_local = ('docker','where','script','config_fn')
 	keys_docker_local_visit = ('docker','where','visit','config_fn')
 	keys_docker_local_opts = ('once','preliminary','collect files','report files',
-		'notes','mounts','container_user','container_site','visit','ports','background','write files')
+		'notes','mounts','container_user','container_site','visit','ports','background',
+		'write files','container_name','wait')
 	keysets = {
 		(keys_docker_local,keys_docker_local_opts):'docker_local',
 		(keys_docker_local_visit,keys_docker_local_opts):'docker_local',}
@@ -257,7 +296,7 @@ def docker_execute_local(**kwargs):
 	kwargs['container_user'] = kwargs.get('container_user',container_user)
 	kwargs['container_site'] = kwargs.get('container_user','/root')
 	if len(choices)!=1: raise Exception(fail)
-	if choices[0]=='docker_local': docker_local(**kwargs)
+	if choices[0]=='docker_local': return docker_local(**kwargs)
 	else: raise Exception(fail)
 
 def docker_local(**kwargs):
@@ -312,7 +351,7 @@ def docker_local(**kwargs):
 	# collect local files
 	for key,val in kwargs.get('collect files',{}).items():
 		shutil.copyfile(os.path.join(os.path.dirname(config_fn),key),os.path.join(spot,val))
-	# write the testset to the top directory. this is a transient file
+	# write the testset to the top directory. this is a transient file which only lives in the host?
 	if 'script' in kwargs:
 		ts = datetime.datetime.fromtimestamp(time.time()).strftime('%Y.%m.%d.%H%M')
 		testset_fn = 'script-run-%s.sh'%ts
@@ -339,16 +378,37 @@ def docker_local(**kwargs):
 		else tuple([int(j) for j in p])) for p in kwargs.get('ports',[])])
 	if run_settings['ports']!='': run_settings['ports'] = ' %s '%run_settings['ports']
 	# run the docker
-	cmd = (("docker run %s"%('--rm -it ' 
+	if kwargs.get('background',False)==False or kwargs.get('visit',True): 
+		run_settings['attach_mode'] = '--rm -it '
+	else: run_settings['attach_mode'] = '-d '
+	if run_settings['testset_file']!=None: 
+		run_settings['tail'] = " bash %(container_site)s/%(testset_file)s"%run_settings
+	else: run_settings['tail'] = ""
+	run_settings['namer'] = "--name=%s "%kwargs['container_name'] if 'container_name' in kwargs else ""	
+	cmd = ("docker run %(namer)s %(attach_mode)s"
+		"-u %(user)s -v %(host_site)s:%(container_site)s%(mounts_extra)s%(ports)s "
+		"%(container_user)s/%(image)s%(tail)s"
+		)%run_settings
+	#! delete the original below after testing
+	cmd_alt = (("docker run %s"%('--rm -it ' 
 		if (kwargs.get('background',False)==False or kwargs.get('visit',True)) else '-d ')+
+		"--name %s "%kwargs['container_name'] if 'container_name' in kwargs else ""+
 		"-u %(user)s -v %(host_site)s:%(container_site)s%(mounts_extra)s%(ports)s "+
 		"%(container_user)s/%(image)s ")%run_settings+(
 		"bash %(container_site)s/%(testset_file)s"%run_settings
 			if run_settings['testset_file']!=None else ""))
 	print('[STATUS] calling docker via: %s'%cmd)
+	# we wait if do_once 
+	do_wait = do_once or kwargs.get('wait',False)
+	# check_call raises exception on failure
 	subprocess.check_call(cmd,shell=True)
+	# wait until the container is removed. best with the back flag for detached mode
+	if do_wait:
+		#! useful place to fork a process and tail the log? obv difficult because GIL
+		subprocess.check_call('docker wait %s'%kwargs['container_name'],shell=True)
 	# clean up the testset script
-	if testset_fn!=None: 
+	#! currently skipping the script cleanup. RESOLVE LATER!
+	if False and testset_fn!=None: 
 		try: os.remove(os.path.join(spot,testset_fn))
 		except: pass
 	# it is no longer necessary to clean up external mounts if they are mounted in ~/host/
@@ -361,6 +421,9 @@ def docker_local(**kwargs):
 		testset_history['events'].append(event)
 		config.update(testset_history=testset_history)
 		write_config(config)
+	respond = {'spot':spot}
+	if testset_fn: respond['script'] = testset_fn
+	return respond
 
 def docker_recap(longest=True,log=False):
 	"""Summarize docker compile times."""
@@ -452,4 +515,106 @@ def avail(config=None,mods=None,**kwargs):
 	# get the interpreted docker configuration
 	instruct = interpret_docker_instructions(config=config,mods=mods)
 	from datapack import asciitree	
-	asciitree(dict(tests=instruct.get('tests',{}).keys()))
+	tests_these = dict(tests=instruct.get('tests',{}).keys())
+	asciitree(tests_these)
+	return tests_these
+
+def gitscan(where,wide=False):
+	"""
+	Scan for any git repositories.
+	"""
+	git_get_time = "$(git log -1 --format=%cd --date=format:'%Y.%m.%d.%H%M')"
+	git_get_commit = '$(git config --get remote.origin.url)"/commit/"$(git rev-parse --short HEAD)'
+	if not wide:
+		os.system('for i in $(find %s -name .git -type d); do (cd $i && '%where+
+			'echo "$i\n\t%s\n\t%s"'%(git_get_commit,git_get_time)+
+			'); done')
+	else:
+		os.system('for i in $(find %s -name .git -type d); do (cd $i && '%where+
+			'echo "%s %s $i"'%(git_get_time,git_get_commit)+
+			'); done')
+
+def gitcheck(where):
+	"""
+	Check for outstanding commits.
+	Try e.g. `make gitcheck where=pier/factory`
+	"""
+	os.system(('for i in $(find %s -name .git -type d); do echo "\nchecking $i" && echo $(cd $(dirname $i) '
+		'&& git status); done'%where))
+
+def megatest(instruct,via,check=False,clear=None):
+	"""
+	The test to end all unit tests.
+	Run with `make megatest instruct=tests/megatest_v1.yaml via=logs`.
+	If you ctrl+c out, then you have to remove the folder yourself (because some files are not written).
+	!!! add keyboard exception that cleans up.
+	"""
+	import yaml,glob
+	# test sequence comes from a separate file
+	#! considered using wildcard to get tests matching a name from avail()
+	spec = yaml.load(open(instruct).read())
+	# read a folder
+	if not os.path.isdir(via):
+		raise Exception('via argument %s must point to a folder with completed tests'%via)
+	logs = glob.glob(os.path.join(via,'*'))
+	# custom proof of work structure is interpreted here 
+	# proof of work originated in tests/testset.py, test
+	# ensure pairs of log
+	regex_log = '^(.*?)\.log$'
+	regex_script = '^(.*?)\.script\.sh$'
+	regex_raw = '^(.*?)\.yaml$'
+	regex_special_summary = '### special summary (.*?)\n'
+	base_logs,base_script = [set([
+		re.match(r,j).group(1) for j in [os.path.basename(i) for i in logs] if re.match(r,j)])
+		for r in [regex_log,regex_script]]
+	if base_logs!=base_script: 
+		raise Exception('failed to pair all test records: %s'%
+			list(set.symmetric_difference(base_logs,base_script)))
+	test_names = list(base_logs)
+	# loop over tests
+	if not check and not clear:
+		for name in spec['sequence']:
+			name_spaceless = '_'.join(name.split())
+			if name_spaceless not in test_names:
+				print('[STATUS] megatest is running test %s'%(name_spaceless))
+				# RUN THE TEST
+				# note that you can set visit below to drop in and see the container without executing
+				# ... which was useful for debugging the mounts
+				test(*name.split(),back=True,wait=True,log=True,visit=False,
+					dump_raw_test=os.path.join(via,'%s.yaml'%name_spaceless))
+			else: print('[STATUS] megatest is skipping test %s because it is logged'%(name_spaceless))
+	else:
+		import yaml
+		from datapack import asciitree
+		report = {}
+		print('[STATUS] status report follows')
+		for name in test_names:
+			with open(os.path.join(via,'%s.log'%name),'r') as fp: text = fp.read()
+			passed = None!=re.search('unit test is complete',text)
+			report[name] = dict(passed=passed)
+			# collect special instructions if passed
+			try:
+				with open(os.path.join(via,'%s.script.sh'%name),'r') as fp: text = fp.read()
+				special = re.search('### special summary (.*?)\n',text,re.M).group(1)
+				report[name]['special'] = yaml.load(special)
+				try: 
+					spot = re.search('^spot=(.*?)\n',text,re.M).group(1).strip()
+					report[name]['spot'] = spot
+				except: pass
+			except: pass
+		asciitree(report)
+		if clear:
+			failed = [k for k,v in report.items() if not v['passed']]
+			for name in failed:
+				try:
+					try: 
+						out_dn = os.path.join('pier',report[name]['spot'],
+							report[name]['special']['sim_name'])
+						shutil.rmtree(out_dn)
+					except: print('[WARNING] could not delete %s'%out_dn)
+					try: os.system('docker rm %s'%name)
+					except: pass
+					for base_fn in ['%s.log','%s.script.sh','%s.yaml']:
+						try: os.remove(os.path.join(via,base_fn%name))
+						except: pass
+				except: print('[WARNING] perhaps failed to clear %s'%name)	
